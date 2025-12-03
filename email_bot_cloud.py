@@ -7,6 +7,7 @@ from bs4 import BeautifulSoup
 import os
 import hashlib
 import datetime
+import re
 
 # --- CONFIGURATION ---
 EMAIL_USER = os.environ.get("EMAIL_USER")
@@ -34,62 +35,113 @@ def connect_to_mail():
         print(f"❌ Error connecting to email: {e}")
         return None
 
+def clean_text(text):
+    if text:
+        return text.strip().replace('\xa0', ' ')
+    return ""
+
+def identify_columns(header_row):
+    """
+    Tries to map column names to indices (0, 1, 2...)
+    Returns a dictionary like: {'date': 0, 'store': 4, ...}
+    """
+    cols = header_row.find_all(['th', 'td'])
+    mapping = {}
+    
+    print(f"   --- Analyzing Header Row ({len(cols)} columns) ---")
+    for idx, col in enumerate(cols):
+        text = clean_text(col.text).lower()
+        print(f"   [Col {idx}]: {text}")
+        
+        if 'date' in text: mapping['date'] = idx
+        elif 'time' in text: mapping['time'] = idx
+        elif 'call' in text or 'phone' in text or 'number' in text: mapping['caller'] = idx
+        elif 'agent' in text or 'rep' in text: mapping['agent'] = idx
+        elif 'store' in text or 'dealership' in text or 'loc' in text: mapping['store'] = idx
+        elif 'status' in text or 'result' in text: mapping['status'] = idx
+        elif 'duration' in text or 'length' in text: mapping['duration'] = idx
+        elif 'note' in text or 'comment' in text: mapping['notes'] = idx
+
+    print(f"   ✅ Mapped Columns: {mapping}")
+    return mapping
+
 def extract_call_data(html_content):
-    """Parses HTML table, extracting Text AND Links."""
     soup = BeautifulSoup(html_content, "html.parser")
     rows_data = []
     
-    rows = soup.find_all('tr')
-    print(f"   - Scanning {len(rows)} rows...")
+    all_rows = soup.find_all('tr')
+    if not all_rows:
+        return []
+
+    # 1. Find the Header Row (First row with meaningful text)
+    header_mapping = {}
+    data_start_index = 0
     
-    for row in rows:
+    for i, row in enumerate(all_rows):
+        # Look for a row that has "Date" or "Caller" in it to be the header
+        text = row.text.lower()
+        if 'date' in text or 'caller' in text or 'store' in text:
+            header_mapping = identify_columns(row)
+            data_start_index = i + 1
+            break
+    
+    # Fallback: If no headers found, use default indices (Blind Guess)
+    if not header_mapping:
+        print("⚠️ No headers found! Using default column mapping.")
+        header_mapping = {
+            'date': 0, 'time': 1, 'caller': 2, 'agent': 3, 
+            'store': 4, 'status': 5, 'duration': 6, 'notes': 7
+        }
+
+    # 2. Extract Data
+    print(f"   - Scanning data starting from row {data_start_index}...")
+    for row in all_rows[data_start_index:]:
         cols = row.find_all(['td', 'th'])
         
-        # We need both text AND potential links from each column
-        clean_cols = []
+        # We need enough columns to match our largest mapped index
+        max_index = max(header_mapping.values()) if header_mapping else 0
+        if len(cols) <= max_index:
+            continue
+
+        # Extract Text & Links
+        row_values = [clean_text(c.text) for c in cols]
+        
+        # Audio / CRM Links search
         audio_link = ""
         crm_link = ""
-        
         for col in cols:
-            text = col.text.strip()
-            clean_cols.append(text)
-            
-            # Check for hidden links inside this column
             link_tag = col.find('a', href=True)
             if link_tag:
                 href = link_tag['href']
-                # If the text says "Listen" or it looks like audio, save it
-                if "listen" in text.lower() or "play" in text.lower() or ".mp3" in href or ".wav" in href:
+                if any(x in clean_text(col.text).lower() for x in ['listen', 'play']) or '.mp3' in href:
                     audio_link = href
-                # If it's a CRM link (often on the Name or a 'View' button)
-                elif "view" in text.lower() or "crm" in str(href):
+                elif any(x in clean_text(col.text).lower() for x in ['view', 'crm']) or 'crm' in href:
                     crm_link = href
 
-        # Ensure we have enough columns to be a valid record (at least 5)
-        if len(clean_cols) >= 5: 
-            # Check if it looks like a date row (has numbers and slashes/dashes)
-            # This replaces the strict "202" check which might fail on "12/01/25"
-            if any(char.isdigit() for char in clean_cols[0]):
-                call_record = {
-                    "date": clean_cols[0],
-                    "time": clean_cols[1],
-                    "caller": clean_cols[2],
-                    "agent": clean_cols[3],
-                    "store": clean_cols[4],
-                    "status": clean_cols[5] if len(clean_cols) > 5 else "Unknown",
-                    "duration": clean_cols[6] if len(clean_cols) > 6 else "",
-                    "notes": clean_cols[7] if len(clean_cols) > 7 else "",
-                    "audio_url": audio_link,  # NEW FIELD
-                    "crm_url": crm_link       # NEW FIELD
-                }
-                rows_data.append(call_record)
+        # Build Record using Mapping
+        # Use .get() with a default to avoid crashes if a column is missing
+        call_record = {
+            "date": row_values[header_mapping.get('date', 0)],
+            "time": row_values[header_mapping.get('time', 1)],
+            "caller": row_values[header_mapping.get('caller', 2)],
+            "agent": row_values[header_mapping.get('agent', 3)],
+            "store": row_values[header_mapping.get('store', 4)],
+            "status": row_values[header_mapping.get('status', 5)],
+            "duration": row_values[header_mapping.get('duration', 6)],
+            "notes": row_values[header_mapping.get('notes', 7)] if len(row_values) > 7 else "",
+            "audio_url": audio_link,
+            "crm_url": crm_link
+        }
+
+        # Validate it looks like a real row (has a date number)
+        if any(char.isdigit() for char in call_record['date']):
+            rows_data.append(call_record)
             
     print(f"   - Extracted {len(rows_data)} valid calls.")
     return rows_data
 
 def push_to_firestore(data):
     if not data:
-        print("⚠️ No call data found in this email.")
         return
     
     collection_ref = db.collection('artifacts').document(APP_ID).collection('public').document('data').collection('calls')
@@ -108,11 +160,9 @@ def push_to_firestore(data):
 
 def process_email():
     mail = connect_to_mail()
-    if not mail:
-        return
+    if not mail: return
 
     mail.select("inbox")
-    
     print(f"--- SEARCHING FOR: {SEARCH_SUBJECT} ---")
     status, messages = mail.search(None, f'(SUBJECT "{SEARCH_SUBJECT}")')
     
@@ -122,9 +172,8 @@ def process_email():
             print(f"❌ No emails found.")
             return
 
-        # Process the LAST 3 emails to ensure we catch recent data
-        # (Processing more than 1 helps populate the "few things" issue)
-        latest_ids = email_ids[-3:] 
+        # Process LAST 5 emails to catch up on data
+        latest_ids = email_ids[-5:] 
         print(f"✅ Found {len(email_ids)} emails. Processing last {len(latest_ids)}...")
         
         for e_id in latest_ids:
@@ -132,7 +181,6 @@ def process_email():
             for response in msg_data:
                 if isinstance(response, tuple):
                     msg = email.message_from_bytes(response[1])
-                    
                     body = ""
                     if msg.is_multipart():
                         for part in msg.walk():
@@ -147,7 +195,6 @@ def process_email():
                         print(f"Processing email ID: {e_id}")
                         data = extract_call_data(body)
                         push_to_firestore(data)
-                            
     mail.logout()
 
 if __name__ == "__main__":
