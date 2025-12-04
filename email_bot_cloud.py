@@ -41,81 +41,104 @@ def clean_text(text):
     return ""
 
 def parse_friendly_date(date_str):
-    """
-    Converts 'Dec 2, 1:29 pm' -> '2025-12-02' and '01:29 PM'
-    """
     try:
         current_year = datetime.datetime.now().year
-        # Parse format like "Dec 2, 1:29 pm"
         dt = datetime.datetime.strptime(f"{current_year} {date_str}", "%Y %b %d, %I:%M %p")
         return dt.strftime("%Y-%m-%d"), dt.strftime("%I:%M %p")
     except:
         return date_str, ""
 
-def extract_store_from_subject(subject):
-    # Subject looks like: "Appt InSights > Simard Automotive 2025-12-02"
-    try:
-        if ">" in subject:
-            parts = subject.split(">")
-            store_part = parts[1].strip() # "Simard Automotive 2025-12-02"
-            # Remove the date from the end if it exists
-            store_name = re.sub(r'\d{4}-\d{2}-\d{2}', '', store_part).strip()
-            return store_name
-    except:
-        pass
-    return "Simard Main" # Default
+def determine_store_and_agent(raw_advisor_text):
+    """
+    Parses 'Ray . - 102' into Agent: 'Ray' and Store: 'Gaffney'
+    """
+    raw_lower = raw_advisor_text.lower()
+    
+    # 1. Extract Extension (look for 3 digits)
+    ext_match = re.search(r'(\d{3})', raw_advisor_text)
+    ext = ext_match.group(1) if ext_match else ""
+    
+    # 2. Clean up Agent Name (Remove digits, dots, dashes)
+    # e.g. "Ray . - 102" -> "Ray"
+    agent_name = re.sub(r'[\d\.\-]+', '', raw_advisor_text).strip()
+    if not agent_name and ext: 
+        agent_name = f"Advisor {ext}" # Fallback if name is empty
+    
+    # 3. Determine Store based on Rules
+    store = "Unknown Store"
+    
+    # Rule Set A: Explicit Location Names in Text
+    if "seward" in raw_lower: store = "Seward"
+    elif "eagle" in raw_lower: store = "Eagle River"
+    elif "airport" in raw_lower: store = "Airport"
+    elif "cushman" in raw_lower: store = "Cushman"
+    elif "m1" in raw_lower: store = "Steese" # Assuming M1 is Steese based on 500s
+    
+    # Rule Set B: Extension Ranges (overrides text if specific)
+    elif ext:
+        if ext.startswith('1'): store = "Gaffney"      # 100s -> Ray/Gaffney
+        elif ext.startswith('2'): store = "Airport"    # 200s -> John/Airport
+        elif ext.startswith('3'): store = "Cushman"    # 300s -> Jed/Cushman
+        elif ext.startswith('4'): store = "Illinois"   # 400s -> Arthur/Illinois
+        elif ext.startswith('5'): 
+            # 500s are split
+            if ext in ['531', '532']: store = "Eagle River"
+            elif ext.startswith('52'): store = "Seward"
+            else: store = "Steese" # 502, 503 fallback
+            
+    return agent_name, store
 
-def extract_call_data(html_content, default_store):
+def extract_call_data(html_content):
     soup = BeautifulSoup(html_content, "html.parser")
     rows_data = []
     
     all_rows = soup.find_all('tr')
     
-    # We look for the standard 7-column layout based on your report
-    # 0: Advisor | 1: Caller | 2: Duration | 3: From | 4: Date | 5: Score | 6: Action
+    # Columns in PDF: Advisor | Caller | Duration | From | Date | Score | Action
     
     for row in all_rows:
         cols = row.find_all(['td', 'th'])
-        # Only process rows that have enough columns and look like data
-        if len(cols) >= 5:
+        if len(cols) >= 6:
             row_text = [clean_text(c.text) for c in cols]
             
-            # Skip header row
+            # Skip Headers
             if "Advisor" in row_text[0] or "Date" in row_text[4]:
                 continue
 
             try:
+                # Basic Data
+                raw_advisor = row_text[0]
                 raw_date = row_text[4]
+                
+                # Intelligent Parsing
+                agent_clean, store_clean = determine_store_and_agent(raw_advisor)
                 iso_date, time_str = parse_friendly_date(raw_date)
                 
-                # Check for links in the last column (Action)
+                # Link Extraction
                 details_link = ""
                 last_col = cols[-1]
                 link_tag = last_col.find('a', href=True)
-                if link_tag:
-                    details_link = link_tag['href']
+                if link_tag: details_link = link_tag['href']
 
-                # Create the record
+                # Create Record
                 call_record = {
-                    "agent": row_text[0],       # Advisor
-                    "caller": row_text[1],      # Caller Name
-                    "duration": row_text[2],    # Duration
-                    "phone": row_text[3],       # From Phone
-                    "date": iso_date,           # YYYY-MM-DD
-                    "time": time_str,           # HH:MM AM
-                    "display_date": raw_date,   # Original text
-                    "store": default_store,     # From Subject Line
-                    "status": "Completed",      # Default status (since report doesn't specify)
-                    "score": row_text[5],       # Score
-                    "crm_url": details_link,    # Link to details
-                    "audio_url": ""             # No direct audio link in this table format usually
+                    "agent": agent_clean,
+                    "caller": row_text[1],
+                    "duration": row_text[2],
+                    "phone": row_text[3],
+                    "date": iso_date,
+                    "time": time_str,
+                    "display_date": raw_date,
+                    "store": store_clean,     # <--- Now Calculated Logic
+                    "score": row_text[5],
+                    "crm_url": details_link,
+                    "audio_url": "",          # No audio links in this specific report format
+                    "status": "Completed"
                 }
                 
-                # Validation: Date must look valid (contains 202)
                 if "202" in iso_date:
                     rows_data.append(call_record)
             except Exception as e:
-                # Skip malformed rows
                 continue
 
     print(f"   - Extracted {len(rows_data)} calls.")
@@ -128,7 +151,6 @@ def push_to_firestore(data):
     
     count = 0
     for record in data:
-        # Unique ID = Date + Time + Phone to avoid duplicates
         unique_string = f"{record['date']}{record['time']}{record['phone']}"
         doc_id = hashlib.md5(unique_string.encode()).hexdigest()
         
@@ -152,7 +174,6 @@ def process_email():
             print(f"❌ No emails found.")
             return
 
-        # Process LAST 5 emails to fill DB with historical data
         latest_ids = email_ids[-5:] 
         print(f"✅ Found {len(email_ids)} emails. Processing last {len(latest_ids)}...")
         
@@ -161,15 +182,6 @@ def process_email():
             for response in msg_data:
                 if isinstance(response, tuple):
                     msg = email.message_from_bytes(response[1])
-                    
-                    # Extract Store from Subject
-                    subject, encoding = decode_header(msg["Subject"])[0]
-                    if isinstance(subject, bytes):
-                        subject = subject.decode(encoding if encoding else "utf-8")
-                    
-                    store_name = extract_store_from_subject(subject)
-                    print(f"   Processing Email: {subject} -> Store: {store_name}")
-
                     body = ""
                     if msg.is_multipart():
                         for part in msg.walk():
@@ -181,7 +193,8 @@ def process_email():
                             body = msg.get_payload(decode=True).decode()
 
                     if body:
-                        data = extract_call_data(body, store_name)
+                        print(f"Processing Email ID: {e_id}")
+                        data = extract_call_data(body)
                         push_to_firestore(data)
     mail.logout()
 
