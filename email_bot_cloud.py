@@ -76,7 +76,6 @@ def determine_store_and_agent(raw_advisor_text):
 def extract_call_data(html_content):
     soup = BeautifulSoup(html_content, "html.parser")
     rows_data = []
-    
     all_rows = soup.find_all('tr')
     
     for row in all_rows:
@@ -121,10 +120,11 @@ def push_to_firestore(data):
     collection_ref = db.collection('artifacts').document(APP_ID).collection('public').document('data').collection('calls')
     count = 0
     for record in data:
+        # Use merge=True so we don't erase human scores if they exist
         unique_string = f"{record['date']}{record['time']}{record['phone']}"
         doc_id = hashlib.md5(unique_string.encode()).hexdigest()
         doc_ref = collection_ref.document(doc_id)
-        doc_ref.set(record, merge=True)
+        doc_ref.set(record, merge=True) 
         count += 1
     print(f"   + Synced {count} calls from this email.")
 
@@ -134,20 +134,20 @@ def process_email():
 
     mail.select("inbox")
     
-    # --- SEARCH FROM NOV 1st ---
-    search_since = "01-Nov-2025" 
-    print(f"--- SYNCING ALL EMAILS SINCE {search_since} ---")
+    # --- CHANGED: LOOK BACK 90 DAYS ---
+    date_lookback = (datetime.date.today() - datetime.timedelta(days=90)).strftime("%d-%b-%Y")
     
-    status, messages = mail.search(None, f'(SUBJECT "{SEARCH_SUBJECT}" SENTSINCE "{search_since}")')
+    print(f"--- BACKFILLING EMAILS SINCE {date_lookback} ---")
+    
+    status, messages = mail.search(None, f'(SUBJECT "{SEARCH_SUBJECT}" SENTSINCE "{date_lookback}")')
     
     if status == "OK":
         email_ids = messages[0].split()
         if not email_ids:
-            print(f"❌ No emails found.")
+            print(f"❌ No emails found since {date_lookback}.")
             return
 
-        # NO LIMITS - PROCESS EVERYTHING
-        print(f"✅ Found {len(email_ids)} emails. PROCESSING ALL...")
+        print(f"✅ Found {len(email_ids)} emails. PROCESSING ALL OF THEM...")
         
         for e_id in email_ids:
             _, msg_data = mail.fetch(e_id, "(RFC822)")
