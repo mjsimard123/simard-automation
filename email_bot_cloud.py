@@ -43,6 +43,7 @@ def clean_text(text):
 def parse_friendly_date(date_str):
     try:
         current_year = datetime.datetime.now().year
+        # Handle "Dec 2, 1:29 am"
         dt = datetime.datetime.strptime(f"{current_year} {date_str}", "%Y %b %d, %I:%M %p")
         return dt.strftime("%Y-%m-%d"), dt.strftime("%I:%M %p")
     except:
@@ -58,33 +59,31 @@ def determine_store_and_agent(raw_advisor_text):
     ext_match = re.search(r'(\d{3})', raw_advisor_text)
     ext = ext_match.group(1) if ext_match else ""
     
-    # 2. Clean up Agent Name (Remove digits, dots, dashes)
-    # e.g. "Ray . - 102" -> "Ray"
+    # 2. Clean up Agent Name
     agent_name = re.sub(r'[\d\.\-]+', '', raw_advisor_text).strip()
     if not agent_name and ext: 
-        agent_name = f"Advisor {ext}" # Fallback if name is empty
+        agent_name = f"Advisor {ext}" 
     
     # 3. Determine Store based on Rules
     store = "Unknown Store"
     
-    # Rule Set A: Explicit Location Names in Text
+    # Text-based rules
     if "seward" in raw_lower: store = "Seward"
     elif "eagle" in raw_lower: store = "Eagle River"
     elif "airport" in raw_lower: store = "Airport"
     elif "cushman" in raw_lower: store = "Cushman"
-    elif "m1" in raw_lower: store = "Steese" # Assuming M1 is Steese based on 500s
+    elif "m1" in raw_lower: store = "Steese" 
     
-    # Rule Set B: Extension Ranges (overrides text if specific)
+    # Extension-based rules (Overrides text)
     elif ext:
-        if ext.startswith('1'): store = "Gaffney"      # 100s -> Ray/Gaffney
-        elif ext.startswith('2'): store = "Airport"    # 200s -> John/Airport
-        elif ext.startswith('3'): store = "Cushman"    # 300s -> Jed/Cushman
-        elif ext.startswith('4'): store = "Illinois"   # 400s -> Arthur/Illinois
+        if ext.startswith('1'): store = "Gaffney"      # 100s
+        elif ext.startswith('2'): store = "Airport"    # 200s
+        elif ext.startswith('3'): store = "Cushman"    # 300s
+        elif ext.startswith('4'): store = "Illinois"   # 400s
         elif ext.startswith('5'): 
-            # 500s are split
             if ext in ['531', '532']: store = "Eagle River"
             elif ext.startswith('52'): store = "Seward"
-            else: store = "Steese" # 502, 503 fallback
+            else: store = "Steese" 
             
     return agent_name, store
 
@@ -93,8 +92,6 @@ def extract_call_data(html_content):
     rows_data = []
     
     all_rows = soup.find_all('tr')
-    
-    # Columns in PDF: Advisor | Caller | Duration | From | Date | Score | Action
     
     for row in all_rows:
         cols = row.find_all(['td', 'th'])
@@ -106,7 +103,6 @@ def extract_call_data(html_content):
                 continue
 
             try:
-                # Basic Data
                 raw_advisor = row_text[0]
                 raw_date = row_text[4]
                 
@@ -120,7 +116,6 @@ def extract_call_data(html_content):
                 link_tag = last_col.find('a', href=True)
                 if link_tag: details_link = link_tag['href']
 
-                # Create Record
                 call_record = {
                     "agent": agent_clean,
                     "caller": row_text[1],
@@ -129,19 +124,18 @@ def extract_call_data(html_content):
                     "date": iso_date,
                     "time": time_str,
                     "display_date": raw_date,
-                    "store": store_clean,     # <--- Now Calculated Logic
+                    "store": store_clean, 
                     "score": row_text[5],
-                    "crm_url": details_link,
-                    "audio_url": "",          # No audio links in this specific report format
+                    "crm_url": details_link, # This is the Call Info Link
                     "status": "Completed"
                 }
                 
+                # Ensure it's a valid row (has a year-like structure in parsed date)
                 if "202" in iso_date:
                     rows_data.append(call_record)
             except Exception as e:
                 continue
 
-    print(f"   - Extracted {len(rows_data)} calls.")
     return rows_data
 
 def push_to_firestore(data):
@@ -151,37 +145,53 @@ def push_to_firestore(data):
     
     count = 0
     for record in data:
+        # Unique ID: Date + Time + Phone
         unique_string = f"{record['date']}{record['time']}{record['phone']}"
         doc_id = hashlib.md5(unique_string.encode()).hexdigest()
         
         doc_ref = collection_ref.document(doc_id)
+        # merge=True prevents overwriting existing data if we run it multiple times
         doc_ref.set(record, merge=True)
         count += 1
             
-    print(f"✅ Synced {count} records.")
+    print(f"   + Synced {count} calls from this email.")
 
 def process_email():
     mail = connect_to_mail()
     if not mail: return
 
     mail.select("inbox")
-    print(f"--- SEARCHING FOR: {SEARCH_SUBJECT} ---")
-    status, messages = mail.search(None, f'(SUBJECT "{SEARCH_SUBJECT}")')
+    
+    # CALCULATE 30 DAYS AGO
+    date_30_days_ago = (datetime.date.today() - datetime.timedelta(days=30)).strftime("%d-%b-%Y")
+    
+    print(f"--- SYNCING EMAILS SINCE {date_30_days_ago} ---")
+    
+    # Search for Subject AND Date
+    search_query = f'(SUBJECT "{SEARCH_SUBJECT}" SENTSINCE "{date_30_days_ago}")'
+    status, messages = mail.search(None, search_query)
     
     if status == "OK":
         email_ids = messages[0].split()
         if not email_ids:
-            print(f"❌ No emails found.")
+            print(f"❌ No emails found since {date_30_days_ago}.")
             return
 
-        latest_ids = email_ids[-5:] 
-        print(f"✅ Found {len(email_ids)} emails. Processing last {len(latest_ids)}...")
+        print(f"✅ Found {len(email_ids)} emails to process.")
         
-        for e_id in latest_ids:
+        # Loop through ALL found emails
+        for e_id in email_ids:
             _, msg_data = mail.fetch(e_id, "(RFC822)")
             for response in msg_data:
                 if isinstance(response, tuple):
                     msg = email.message_from_bytes(response[1])
+                    
+                    # Log Subject for debugging
+                    subject, encoding = decode_header(msg["Subject"])[0]
+                    if isinstance(subject, bytes):
+                        subject = subject.decode(encoding if encoding else "utf-8")
+                    print(f"Processing: {subject}")
+
                     body = ""
                     if msg.is_multipart():
                         for part in msg.walk():
@@ -193,7 +203,6 @@ def process_email():
                             body = msg.get_payload(decode=True).decode()
 
                     if body:
-                        print(f"Processing Email ID: {e_id}")
                         data = extract_call_data(body)
                         push_to_firestore(data)
     mail.logout()
