@@ -13,11 +13,10 @@ import re
 EMAIL_USER = os.environ.get("EMAIL_USER")
 EMAIL_PASS = os.environ.get("EMAIL_PASS")
 IMAP_SERVER = "imap.gmail.com"
-SEARCH_SENDER = 'noreply@callinbound.com' # We trust the sender, not the subject
+SEARCH_SENDER = 'noreply@callinbound.com'
 CRED_PATH = 'serviceAccountKey.json' 
 APP_ID = "simard-insights-app" 
 
-# Initialize Firebase
 if not firebase_admin._apps:
     cred = credentials.Certificate(CRED_PATH)
     firebase_admin.initialize_app(cred)
@@ -36,8 +35,7 @@ def connect_to_mail():
         return None
 
 def clean_text(text):
-    if text:
-        return " ".join(text.split()).strip()
+    if text: return " ".join(text.split()).strip()
     return ""
 
 def parse_friendly_date(date_str):
@@ -82,7 +80,6 @@ def extract_call_data(html_content):
         cols = row.find_all(['td', 'th'])
         if len(cols) >= 6:
             row_text = [clean_text(c.text) for c in cols]
-            # Skip Headers (Check for common header terms)
             if "Advisor" in row_text[0] or "Date" in row_text[4]: continue
 
             try:
@@ -132,27 +129,27 @@ def process_email():
     mail = connect_to_mail()
     if not mail: return
 
+    # Try All Mail, Fallback to Inbox
     try:
         mail.select('"[Gmail]/All Mail"')
-        print("✅ Selected '[Gmail]/All Mail' folder.")
     except:
-        print("⚠️ Could not find All Mail, falling back to Inbox.")
         mail.select("inbox")
     
-    # LOOK BACK 120 DAYS
-    date_lookback = (datetime.date.today() - datetime.timedelta(days=120)).strftime("%d-%b-%Y")
+    # --- DAILY MAINTENANCE: Look back only 2 days ---
+    # This keeps the daily run fast (seconds instead of minutes)
+    date_lookback = (datetime.date.today() - datetime.timedelta(days=2)).strftime("%d-%b-%Y")
     
-    print(f"--- DEEP SEARCH: SENDER {SEARCH_SENDER} SINCE {date_lookback} ---")
+    print(f"--- DAILY SCAN: SENDER {SEARCH_SENDER} SINCE {date_lookback} ---")
     
     status, messages = mail.search(None, f'(FROM "{SEARCH_SENDER}" SENTSINCE "{date_lookback}")')
     
     if status == "OK":
         email_ids = messages[0].split()
         if not email_ids:
-            print(f"❌ No emails found.")
+            print("✅ Up to date. No new emails found.")
             return
 
-        print(f"✅ Found {len(email_ids)} emails in History. PROCESSING ALL...")
+        print(f"✅ Found {len(email_ids)} recent emails. Processing...")
         
         for e_id in email_ids:
             _, msg_data = mail.fetch(e_id, "(RFC822)")
@@ -162,21 +159,22 @@ def process_email():
                     subject, encoding = decode_header(msg["Subject"])[0]
                     if isinstance(subject, bytes): subject = subject.decode(encoding if encoding else "utf-8")
                     
-                    print(f"Processing: {subject}")
-                    
-                    body = ""
-                    if msg.is_multipart():
-                        for part in msg.walk():
-                            if part.get_content_type() == "text/html":
-                                body = part.get_payload(decode=True).decode()
-                                break
-                    else:
-                        if msg.get_content_type() == "text/html":
-                            body = msg.get_payload(decode=True).decode()
+                    # Safety check to ensure it's a report
+                    if "Report" in subject or "Appt" in subject:
+                        print(f"Processing: {subject}")
+                        body = ""
+                        if msg.is_multipart():
+                            for part in msg.walk():
+                                if part.get_content_type() == "text/html":
+                                    body = part.get_payload(decode=True).decode()
+                                    break
+                        else:
+                            if msg.get_content_type() == "text/html":
+                                body = msg.get_payload(decode=True).decode()
 
-                    if body:
-                        data = extract_call_data(body)
-                        push_to_firestore(data)
+                        if body:
+                            data = extract_call_data(body)
+                            push_to_firestore(data)
     mail.logout()
 
 if __name__ == "__main__":
