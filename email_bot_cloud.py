@@ -13,8 +13,7 @@ import re
 EMAIL_USER = os.environ.get("EMAIL_USER")
 EMAIL_PASS = os.environ.get("EMAIL_PASS")
 IMAP_SERVER = "imap.gmail.com"
-# SEARCH BY SENDER INSTEAD OF SUBJECT
-SEARCH_SENDER = 'noreply@callinbound.com'
+SEARCH_SENDER = 'noreply@callinbound.com' # We trust the sender, not the subject
 CRED_PATH = 'serviceAccountKey.json' 
 APP_ID = "simard-insights-app" 
 
@@ -83,6 +82,7 @@ def extract_call_data(html_content):
         cols = row.find_all(['td', 'th'])
         if len(cols) >= 6:
             row_text = [clean_text(c.text) for c in cols]
+            # Skip Headers (Check for common header terms)
             if "Advisor" in row_text[0] or "Date" in row_text[4]: continue
 
             try:
@@ -132,7 +132,6 @@ def process_email():
     mail = connect_to_mail()
     if not mail: return
 
-    # --- MAJOR CHANGE: SELECT ALL MAIL (ARCHIVES) ---
     try:
         mail.select('"[Gmail]/All Mail"')
         print("✅ Selected '[Gmail]/All Mail' folder.")
@@ -140,12 +139,11 @@ def process_email():
         print("⚠️ Could not find All Mail, falling back to Inbox.")
         mail.select("inbox")
     
-    # --- LOOK BACK 120 DAYS (approx 4 months) ---
+    # LOOK BACK 120 DAYS
     date_lookback = (datetime.date.today() - datetime.timedelta(days=120)).strftime("%d-%b-%Y")
     
     print(f"--- DEEP SEARCH: SENDER {SEARCH_SENDER} SINCE {date_lookback} ---")
     
-    # Search by SENDER to be more robust
     status, messages = mail.search(None, f'(FROM "{SEARCH_SENDER}" SENTSINCE "{date_lookback}")')
     
     if status == "OK":
@@ -164,22 +162,21 @@ def process_email():
                     subject, encoding = decode_header(msg["Subject"])[0]
                     if isinstance(subject, bytes): subject = subject.decode(encoding if encoding else "utf-8")
                     
-                    # Double check subject contains "Appt" to avoid junk
-                    if "Appt" in subject:
-                        print(f"Processing: {subject}")
-                        body = ""
-                        if msg.is_multipart():
-                            for part in msg.walk():
-                                if part.get_content_type() == "text/html":
-                                    body = part.get_payload(decode=True).decode()
-                                    break
-                        else:
-                            if msg.get_content_type() == "text/html":
-                                body = msg.get_payload(decode=True).decode()
+                    print(f"Processing: {subject}")
+                    
+                    body = ""
+                    if msg.is_multipart():
+                        for part in msg.walk():
+                            if part.get_content_type() == "text/html":
+                                body = part.get_payload(decode=True).decode()
+                                break
+                    else:
+                        if msg.get_content_type() == "text/html":
+                            body = msg.get_payload(decode=True).decode()
 
-                        if body:
-                            data = extract_call_data(body)
-                            push_to_firestore(data)
+                    if body:
+                        data = extract_call_data(body)
+                        push_to_firestore(data)
     mail.logout()
 
 if __name__ == "__main__":
