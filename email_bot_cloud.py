@@ -126,11 +126,10 @@ def extract_call_data(html_content):
                     "display_date": raw_date,
                     "store": store_clean, 
                     "score": row_text[5],
-                    "crm_url": details_link, # This is the Call Info Link
+                    "crm_url": details_link, 
                     "status": "Completed"
                 }
                 
-                # Ensure it's a valid row (has a year-like structure in parsed date)
                 if "202" in iso_date:
                     rows_data.append(call_record)
             except Exception as e:
@@ -145,12 +144,11 @@ def push_to_firestore(data):
     
     count = 0
     for record in data:
-        # Unique ID: Date + Time + Phone
+        # Unique ID
         unique_string = f"{record['date']}{record['time']}{record['phone']}"
         doc_id = hashlib.md5(unique_string.encode()).hexdigest()
         
         doc_ref = collection_ref.document(doc_id)
-        # merge=True prevents overwriting existing data if we run it multiple times
         doc_ref.set(record, merge=True)
         count += 1
             
@@ -162,31 +160,26 @@ def process_email():
 
     mail.select("inbox")
     
-    # CALCULATE 30 DAYS AGO
-    date_30_days_ago = (datetime.date.today() - datetime.timedelta(days=30)).strftime("%d-%b-%Y")
+    # --- CHANGED: LOOK BACK TO NOV 1, 2025 ---
+    search_since = "01-Nov-2025"
+    print(f"--- SYNCING ALL EMAILS SINCE {search_since} ---")
     
-    print(f"--- SYNCING EMAILS SINCE {date_30_days_ago} ---")
-    
-    # Search for Subject AND Date
-    search_query = f'(SUBJECT "{SEARCH_SUBJECT}" SENTSINCE "{date_30_days_ago}")'
-    status, messages = mail.search(None, search_query)
+    status, messages = mail.search(None, f'(SUBJECT "{SEARCH_SUBJECT}" SENTSINCE "{search_since}")')
     
     if status == "OK":
         email_ids = messages[0].split()
         if not email_ids:
-            print(f"❌ No emails found since {date_30_days_ago}.")
+            print(f"❌ No emails found since {search_since}.")
             return
 
-        print(f"✅ Found {len(email_ids)} emails to process.")
+        print(f"✅ Found {len(email_ids)} emails. PROCESSING ALL OF THEM...")
         
-        # Loop through ALL found emails
+        # Loop through ALL found emails (Removed the limit)
         for e_id in email_ids:
             _, msg_data = mail.fetch(e_id, "(RFC822)")
             for response in msg_data:
                 if isinstance(response, tuple):
                     msg = email.message_from_bytes(response[1])
-                    
-                    # Log Subject for debugging
                     subject, encoding = decode_header(msg["Subject"])[0]
                     if isinstance(subject, bytes):
                         subject = subject.decode(encoding if encoding else "utf-8")
