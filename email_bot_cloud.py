@@ -37,126 +37,106 @@ def connect_to_mail():
 
 def clean_text(text):
     if text:
-        return text.strip().replace('\xa0', ' ')
+        return " ".join(text.split()).strip()
     return ""
 
-def identify_columns(header_row):
+def parse_friendly_date(date_str):
     """
-    Tries to map column names to indices (0, 1, 2...)
-    Returns a dictionary like: {'date': 0, 'store': 4, ...}
+    Converts 'Dec 2, 1:29 pm' -> '2025-12-02' and '01:29 PM'
     """
-    cols = header_row.find_all(['th', 'td'])
-    mapping = {}
-    
-    print(f"   --- Analyzing Header Row ({len(cols)} columns) ---")
-    for idx, col in enumerate(cols):
-        text = clean_text(col.text).lower()
-        print(f"   [Col {idx}]: {text}")
-        
-        if 'date' in text: mapping['date'] = idx
-        elif 'time' in text: mapping['time'] = idx
-        elif 'call' in text or 'phone' in text or 'number' in text: mapping['caller'] = idx
-        elif 'agent' in text or 'rep' in text: mapping['agent'] = idx
-        elif 'store' in text or 'dealership' in text or 'loc' in text: mapping['store'] = idx
-        elif 'status' in text or 'result' in text: mapping['status'] = idx
-        elif 'duration' in text or 'length' in text: mapping['duration'] = idx
-        elif 'note' in text or 'comment' in text: mapping['notes'] = idx
+    try:
+        current_year = datetime.datetime.now().year
+        # Parse format like "Dec 2, 1:29 pm"
+        dt = datetime.datetime.strptime(f"{current_year} {date_str}", "%Y %b %d, %I:%M %p")
+        return dt.strftime("%Y-%m-%d"), dt.strftime("%I:%M %p")
+    except:
+        return date_str, ""
 
-    print(f"   ✅ Mapped Columns: {mapping}")
-    return mapping
+def extract_store_from_subject(subject):
+    # Subject looks like: "Appt InSights > Simard Automotive 2025-12-02"
+    try:
+        if ">" in subject:
+            parts = subject.split(">")
+            store_part = parts[1].strip() # "Simard Automotive 2025-12-02"
+            # Remove the date from the end if it exists
+            store_name = re.sub(r'\d{4}-\d{2}-\d{2}', '', store_part).strip()
+            return store_name
+    except:
+        pass
+    return "Simard Main" # Default
 
-def extract_call_data(html_content):
+def extract_call_data(html_content, default_store):
     soup = BeautifulSoup(html_content, "html.parser")
     rows_data = []
     
     all_rows = soup.find_all('tr')
-    if not all_rows:
-        return []
-
-    # 1. Find the Header Row (First row with meaningful text)
-    header_mapping = {}
-    data_start_index = 0
     
-    for i, row in enumerate(all_rows):
-        # Look for a row that has "Date" or "Caller" in it to be the header
-        text = row.text.lower()
-        if 'date' in text or 'caller' in text or 'store' in text:
-            header_mapping = identify_columns(row)
-            data_start_index = i + 1
-            break
+    # We look for the standard 7-column layout based on your report
+    # 0: Advisor | 1: Caller | 2: Duration | 3: From | 4: Date | 5: Score | 6: Action
     
-    # Fallback: If no headers found, use default indices (Blind Guess)
-    if not header_mapping:
-        print("⚠️ No headers found! Using default column mapping.")
-        header_mapping = {
-            'date': 0, 'time': 1, 'caller': 2, 'agent': 3, 
-            'store': 4, 'status': 5, 'duration': 6, 'notes': 7
-        }
-
-    # 2. Extract Data
-    print(f"   - Scanning data starting from row {data_start_index}...")
-    for row in all_rows[data_start_index:]:
+    for row in all_rows:
         cols = row.find_all(['td', 'th'])
-        
-        # We need enough columns to match our largest mapped index
-        max_index = max(header_mapping.values()) if header_mapping else 0
-        if len(cols) <= max_index:
-            continue
-
-        # Extract Text & Links
-        row_values = [clean_text(c.text) for c in cols]
-        
-        # Audio / CRM Links search
-        audio_link = ""
-        crm_link = ""
-        for col in cols:
-            link_tag = col.find('a', href=True)
-            if link_tag:
-                href = link_tag['href']
-                if any(x in clean_text(col.text).lower() for x in ['listen', 'play']) or '.mp3' in href:
-                    audio_link = href
-                elif any(x in clean_text(col.text).lower() for x in ['view', 'crm']) or 'crm' in href:
-                    crm_link = href
-
-        # Build Record using Mapping
-        # Use .get() with a default to avoid crashes if a column is missing
-        call_record = {
-            "date": row_values[header_mapping.get('date', 0)],
-            "time": row_values[header_mapping.get('time', 1)],
-            "caller": row_values[header_mapping.get('caller', 2)],
-            "agent": row_values[header_mapping.get('agent', 3)],
-            "store": row_values[header_mapping.get('store', 4)],
-            "status": row_values[header_mapping.get('status', 5)],
-            "duration": row_values[header_mapping.get('duration', 6)],
-            "notes": row_values[header_mapping.get('notes', 7)] if len(row_values) > 7 else "",
-            "audio_url": audio_link,
-            "crm_url": crm_link
-        }
-
-        # Validate it looks like a real row (has a date number)
-        if any(char.isdigit() for char in call_record['date']):
-            rows_data.append(call_record)
+        # Only process rows that have enough columns and look like data
+        if len(cols) >= 5:
+            row_text = [clean_text(c.text) for c in cols]
             
-    print(f"   - Extracted {len(rows_data)} valid calls.")
+            # Skip header row
+            if "Advisor" in row_text[0] or "Date" in row_text[4]:
+                continue
+
+            try:
+                raw_date = row_text[4]
+                iso_date, time_str = parse_friendly_date(raw_date)
+                
+                # Check for links in the last column (Action)
+                details_link = ""
+                last_col = cols[-1]
+                link_tag = last_col.find('a', href=True)
+                if link_tag:
+                    details_link = link_tag['href']
+
+                # Create the record
+                call_record = {
+                    "agent": row_text[0],       # Advisor
+                    "caller": row_text[1],      # Caller Name
+                    "duration": row_text[2],    # Duration
+                    "phone": row_text[3],       # From Phone
+                    "date": iso_date,           # YYYY-MM-DD
+                    "time": time_str,           # HH:MM AM
+                    "display_date": raw_date,   # Original text
+                    "store": default_store,     # From Subject Line
+                    "status": "Completed",      # Default status (since report doesn't specify)
+                    "score": row_text[5],       # Score
+                    "crm_url": details_link,    # Link to details
+                    "audio_url": ""             # No direct audio link in this table format usually
+                }
+                
+                # Validation: Date must look valid (contains 202)
+                if "202" in iso_date:
+                    rows_data.append(call_record)
+            except Exception as e:
+                # Skip malformed rows
+                continue
+
+    print(f"   - Extracted {len(rows_data)} calls.")
     return rows_data
 
 def push_to_firestore(data):
-    if not data:
-        return
+    if not data: return
     
     collection_ref = db.collection('artifacts').document(APP_ID).collection('public').document('data').collection('calls')
     
     count = 0
     for record in data:
-        # Create unique ID
-        unique_string = f"{record['date']}{record['time']}{record['caller']}"
+        # Unique ID = Date + Time + Phone to avoid duplicates
+        unique_string = f"{record['date']}{record['time']}{record['phone']}"
         doc_id = hashlib.md5(unique_string.encode()).hexdigest()
         
         doc_ref = collection_ref.document(doc_id)
         doc_ref.set(record, merge=True)
         count += 1
             
-    print(f"✅ Synced {count} records to Firestore.")
+    print(f"✅ Synced {count} records.")
 
 def process_email():
     mail = connect_to_mail()
@@ -172,7 +152,7 @@ def process_email():
             print(f"❌ No emails found.")
             return
 
-        # Process LAST 5 emails to catch up on data
+        # Process LAST 5 emails to fill DB with historical data
         latest_ids = email_ids[-5:] 
         print(f"✅ Found {len(email_ids)} emails. Processing last {len(latest_ids)}...")
         
@@ -181,6 +161,15 @@ def process_email():
             for response in msg_data:
                 if isinstance(response, tuple):
                     msg = email.message_from_bytes(response[1])
+                    
+                    # Extract Store from Subject
+                    subject, encoding = decode_header(msg["Subject"])[0]
+                    if isinstance(subject, bytes):
+                        subject = subject.decode(encoding if encoding else "utf-8")
+                    
+                    store_name = extract_store_from_subject(subject)
+                    print(f"   Processing Email: {subject} -> Store: {store_name}")
+
                     body = ""
                     if msg.is_multipart():
                         for part in msg.walk():
@@ -192,8 +181,7 @@ def process_email():
                             body = msg.get_payload(decode=True).decode()
 
                     if body:
-                        print(f"Processing email ID: {e_id}")
-                        data = extract_call_data(body)
+                        data = extract_call_data(body, store_name)
                         push_to_firestore(data)
     mail.logout()
 
