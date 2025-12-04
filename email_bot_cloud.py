@@ -43,43 +43,29 @@ def clean_text(text):
 def parse_friendly_date(date_str):
     try:
         current_year = datetime.datetime.now().year
-        # Handle "Dec 2, 1:29 am"
         dt = datetime.datetime.strptime(f"{current_year} {date_str}", "%Y %b %d, %I:%M %p")
         return dt.strftime("%Y-%m-%d"), dt.strftime("%I:%M %p")
     except:
         return date_str, ""
 
 def determine_store_and_agent(raw_advisor_text):
-    """
-    Parses 'Ray . - 102' into Agent: 'Ray' and Store: 'Gaffney'
-    """
     raw_lower = raw_advisor_text.lower()
-    
-    # 1. Extract Extension (look for 3 digits)
     ext_match = re.search(r'(\d{3})', raw_advisor_text)
     ext = ext_match.group(1) if ext_match else ""
-    
-    # 2. Clean up Agent Name
     agent_name = re.sub(r'[\d\.\-]+', '', raw_advisor_text).strip()
-    if not agent_name and ext: 
-        agent_name = f"Advisor {ext}" 
+    if not agent_name and ext: agent_name = f"Advisor {ext}" 
     
-    # 3. Determine Store based on Rules
     store = "Unknown Store"
-    
-    # Text-based rules
     if "seward" in raw_lower: store = "Seward"
     elif "eagle" in raw_lower: store = "Eagle River"
     elif "airport" in raw_lower: store = "Airport"
     elif "cushman" in raw_lower: store = "Cushman"
     elif "m1" in raw_lower: store = "Steese" 
-    
-    # Extension-based rules (Overrides text)
     elif ext:
-        if ext.startswith('1'): store = "Gaffney"      # 100s
-        elif ext.startswith('2'): store = "Airport"    # 200s
-        elif ext.startswith('3'): store = "Cushman"    # 300s
-        elif ext.startswith('4'): store = "Illinois"   # 400s
+        if ext.startswith('1'): store = "Gaffney"
+        elif ext.startswith('2'): store = "Airport"
+        elif ext.startswith('3'): store = "Cushman"
+        elif ext.startswith('4'): store = "Illinois"
         elif ext.startswith('5'): 
             if ext in ['531', '532']: store = "Eagle River"
             elif ext.startswith('52'): store = "Seward"
@@ -97,20 +83,14 @@ def extract_call_data(html_content):
         cols = row.find_all(['td', 'th'])
         if len(cols) >= 6:
             row_text = [clean_text(c.text) for c in cols]
-            
-            # Skip Headers
-            if "Advisor" in row_text[0] or "Date" in row_text[4]:
-                continue
+            if "Advisor" in row_text[0] or "Date" in row_text[4]: continue
 
             try:
                 raw_advisor = row_text[0]
                 raw_date = row_text[4]
-                
-                # Intelligent Parsing
                 agent_clean, store_clean = determine_store_and_agent(raw_advisor)
                 iso_date, time_str = parse_friendly_date(raw_date)
                 
-                # Link Extraction
                 details_link = ""
                 last_col = cols[-1]
                 link_tag = last_col.find('a', href=True)
@@ -134,24 +114,18 @@ def extract_call_data(html_content):
                     rows_data.append(call_record)
             except Exception as e:
                 continue
-
     return rows_data
 
 def push_to_firestore(data):
     if not data: return
-    
     collection_ref = db.collection('artifacts').document(APP_ID).collection('public').document('data').collection('calls')
-    
     count = 0
     for record in data:
-        # Unique ID
         unique_string = f"{record['date']}{record['time']}{record['phone']}"
         doc_id = hashlib.md5(unique_string.encode()).hexdigest()
-        
         doc_ref = collection_ref.document(doc_id)
         doc_ref.set(record, merge=True)
         count += 1
-            
     print(f"   + Synced {count} calls from this email.")
 
 def process_email():
@@ -160,8 +134,8 @@ def process_email():
 
     mail.select("inbox")
     
-    # --- CHANGED: LOOK BACK TO NOV 1, 2025 ---
-    search_since = "01-Nov-2025"
+    # --- SEARCH FROM NOV 1st ---
+    search_since = "01-Nov-2025" 
     print(f"--- SYNCING ALL EMAILS SINCE {search_since} ---")
     
     status, messages = mail.search(None, f'(SUBJECT "{SEARCH_SUBJECT}" SENTSINCE "{search_since}")')
@@ -169,20 +143,19 @@ def process_email():
     if status == "OK":
         email_ids = messages[0].split()
         if not email_ids:
-            print(f"❌ No emails found since {search_since}.")
+            print(f"❌ No emails found.")
             return
 
-        print(f"✅ Found {len(email_ids)} emails. PROCESSING ALL OF THEM...")
+        # NO LIMITS - PROCESS EVERYTHING
+        print(f"✅ Found {len(email_ids)} emails. PROCESSING ALL...")
         
-        # Loop through ALL found emails (Removed the limit)
         for e_id in email_ids:
             _, msg_data = mail.fetch(e_id, "(RFC822)")
             for response in msg_data:
                 if isinstance(response, tuple):
                     msg = email.message_from_bytes(response[1])
                     subject, encoding = decode_header(msg["Subject"])[0]
-                    if isinstance(subject, bytes):
-                        subject = subject.decode(encoding if encoding else "utf-8")
+                    if isinstance(subject, bytes): subject = subject.decode(encoding if encoding else "utf-8")
                     print(f"Processing: {subject}")
 
                     body = ""
