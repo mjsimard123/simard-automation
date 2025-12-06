@@ -1,0 +1,34 @@
+name: Daily Email Parse
+
+on:
+  schedule:
+    # Runs at 3:00 AM AST (07:00 UTC) every day
+    - cron: '0 7 * * *'
+  workflow_dispatch: # Allows you to click the "Run" button manually
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install Libraries
+        run: pip install -r requirements.txt
+
+      - name: Create Service Account File
+        # This creates the key file your script is looking for (serviceAccountKey.json)
+        run: |
+          echo '${{ secrets.FIREBASE_SERVICE_ACCOUNT }}' > serviceAccountKey.json
+
+      - name: Run The Bot
+        env:
+          # These unlock your email so the bot can read it
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+        run: python email_bot_cloud.py
