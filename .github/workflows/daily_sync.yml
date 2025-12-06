@@ -2,33 +2,40 @@ name: Daily Email Parse
 
 on:
   schedule:
-    # Runs at 3:00 AM AST (07:00 UTC) every day
-    - cron: '0 7 * * *'
-  workflow_dispatch: # Allows you to click the "Run" button manually
+    - cron: '0 8 * * *'
+  workflow_dispatch:
 
 jobs:
-  run-bot:
+  run-script:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v3
+      - uses: actions/checkout@v3
 
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
 
-      - name: Install Libraries
-        run: pip install -r requirements.txt
-
-      - name: Create Service Account File
-        # This creates the key file your script is looking for (serviceAccountKey.json)
+      - name: Install dependencies
         run: |
-          echo '${{ secrets.FIREBASE_SERVICE_ACCOUNT }}' > serviceAccountKey.json
+          pip install firebase-admin beautifulsoup4
 
-      - name: Run The Bot
+      - name: Create Key File
         env:
-          # These unlock your email so the bot can read it
+          # This maps the secret to a shell variable
+          THE_KEY: ${{ secrets.FIREBASE_KEY }}
+        run: |
+          # This checks if the key is empty before trying to write it
+          if [ -z "$THE_KEY" ]; then
+            echo "❌ ERROR: The Secret FIREBASE_KEY was not found!"
+            exit 1
+          else
+            echo "✅ Secret found. Creating JSON file..."
+            echo "$THE_KEY" > serviceAccountKey.json
+          fi
+
+      - name: Run Script
+        env:
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
         run: python email_bot_cloud.py
